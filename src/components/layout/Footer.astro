@@ -1,5 +1,7 @@
 ---
 import { menuLinks, siteConfig } from "@/site.config";
+import Icon from "./Icon.astro";
+const themeCredits = "https://github.com/chrismwilliams/astro-theme-cactus";
 
 const year = new Date().getFullYear();
 ---
@@ -9,7 +11,11 @@ const year = new Date().getFullYear();
 >
 	<div class="me-0 sm:me-4">
 		&copy; {siteConfig.author}
-		{year}.<span class="inline-block">&nbsp;🚀&nbsp;{siteConfig.title}</span>
+		{year}
+		<br>Inspired by 
+		<a href={themeCredits} target="_blank" rel="noopener noreferrer" class="underline hover:text-global-text">
+			Astro Cactus
+		</a>
 	</div>
 	<nav
 		aria-labelledby="footer_links"
@@ -24,4 +30,5 @@ const year = new Date().getFullYear();
 			))
 		}
 	</nav>
+	<Icon />
 </footer>
