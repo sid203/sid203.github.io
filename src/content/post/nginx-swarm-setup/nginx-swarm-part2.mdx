@@ -1,0 +1,474 @@
+---
+title: "Multiple Docker Services on One VM with Nginx - Part 2"
+description: "Part 2 of the article showcasing how a GCE VM can be configured with nginx configuration & automated SSL certificate management"
+publishDate: "22 Aug 2025"
+updatedDate: "22 Aug 2025"
+tags: ["DevOps", "Software Engineering"]
+draft: false
+---
+import nginxImg from './nginx-docker-stack.png';
+
+<div class="text-left leading-relaxed">
+
+In this part, we'll continue from where we left off. If you haven't already read the [first part](/posts/nginx-swarm-setup/nginx-swarm-part1/), 
+I recommend going through it to better grasp what's happening here. We are building a stack of Docker services 
+orchestrated by Docker Swarm where each deployed service is accessible through Nginx. The management of Nginx configuration and SSL certificate 
+management was covered in the first part where both services were themselves deployed as Docker services. 
+In this article we'll see how we can integrate an application, for example Portainer, into our setup. We will also integrate Elasticsearch, Kibana 
+& Jenkins in our setup.  
+
+
+
+### Integrating an Application: Portainer
+
+[Portainer](https://www.portainer.io/) is an application that helps to monitor Docker containers, services and stacks. It is possible to 
+check logs, deploy new containers, remove existing ones, check resource consumption etc. For us, the objective is to access the Portainer 
+dashboard on some URL, say [https://example.com/portainer](http://www.example.com/portainer). This example application demonstrates how it 
+can be integrated with our current setup. The process is largely generic and can be easily adapted to integrate other applications with 
+minimal modifications.
+
+
+#### portainer as a deployed service 
+
+Portainer documentation has a [dedicated tutorial](https://docs.portainer.io/advanced/reverse-proxy/nginx) for deploying portainer 
+behind nginx proxy in a docker swarm setup. The compose file that I have written is majorly taken from the tutorial. 
+
+```yaml
+version: '3.2'
+
+services:
+ agent:
+   image: portainer/agent:2.20.3
+   environment:
+     AGENT_CLUSTER_ADDR: tasks.agent
+   volumes:
+     - /var/run/docker.sock:/var/run/docker.sock
+     - /var/lib/docker/volumes:/var/lib/docker/volumes
+   networks:
+     - agent_network
+   deploy:
+     mode: global
+     placement:
+       constraints: [ node.platform.os == linux ]
+
+ portainer:
+   image: portainer/portainer-ce:2.20.3
+   command: -H tcp://tasks.agent:9001 --tlsskipverify
+   volumes:
+     - portainer_data:/data
+     - /var/run/docker.sock:/var/run/docker.sock
+   environment:
+     - VIRTUAL_HOST=${APP_DOMAIN_ADDR}
+     - VIRTUAL_PORT=9000
+     - VIRTUAL_PATH=${PORTAINER_PATH}
+     - VIRTUAL_DEST=/
+     - LETSENCRYPT_HOST=${APP_DOMAIN_ADDR}
+   networks:
+     - ${SWARM_NAME}_${NGINX_NETWORK_NAME}
+     - agent_network
+   deploy:
+     mode: replicated
+     replicas: 1
+     placement:
+       constraints: [ node.role == manager ]
+
+networks:
+ agent_network:
+   driver: overlay
+   attachable: true
+ ${SWARM_NAME}_${NGINX_NETWORK_NAME}:
+   external: true
+
+volumes:
+ portainer_data:
+```
+
+The Portainer setup runs two container services: the agent and Portainer itself. The agent and the portainer containers 
+communicate with each other over the *agent\_network*. The portainer container must also communicate with the nginx-proxy and acme-companion 
+containers, which is done via the *proxy-net* (or the environment variable <span style="color:green">$\{SWARM_NAME\}_$\{NGINX_NETWORK_NAME\}</span>). 
+The most important part of the above compose file is the environment variables for the Portainer image which are required to configure the 
+SSL certificate acquisition setup and make the Portainer dashboard accessible via a URL. Let’s have a look at these variables in detail.
+
+
+<span style="color:red">Environment Variables</span>
+
+These variables are responsible for integrating with the nginx-proxy & acme-companion setup. We will declare similar variables for other applications as well.
+
+* <span style="color:green">$VIRTUAL_HOST</span> : The domain address where the application will be hosted. For example, if we want to host the application at [https://example.com/portainer](http://www.example.com/portainer) then the value should be VIRTUAL_HOST=example.com    
+* <span style="color:green">$VIRTUAL_PORT</span> : Similar to docker’s **expose**, this variable specifies which port the container should expose. By default, the Portainer UI is accessible on port 9000 via HTTP, so it should be set as VIRTUAL\_PORT=9000. This ensures *nginx-proxy* routes requests to the portainer UI through this exposed port.   
+* <span style="color:green">$VIRTUAL_PATH</span> : Defines the path segment that follows the domain URL. For example, the subpath (/portainer/) in [https://example.com/portainer/](http://www.example.com/portainer/) can be configured by setting VIRTUAL\_PATH=/portainer/   
+* <span style="color:green">$VIRTUAL_DEST</span> : Used to rewrite the VIRTUAL_PATH portion of the requested URL before forwarding it to the proxied application. This is useful when an application does not natively support running behind a subpath. For example, setting VIRTUAL\_DEST=/ strips /portainer/ from the request and forwards it directly to the application.    
+* <span style="color:green">$LETSENCRYPT_HOST</span> : This variable triggers SSL certificate acquisition. Setting LETSENCRYPT\_HOST=[example.com](http://www.example.com) initiates the request for an SSL certificate. 
+</div>
+
+#### Optional: Understanding the behaviour of <span style="color:green">$VIRTUAL_PATH</span> & <span style="color:green">$VIRTUAL_DEST</span> and their impact on nginx configuration
+
+Let’s begin by understanding the location directive in nginx. Nginx configuration has a location directive which helps the server process the incoming request and route these 
+requests based on their URL path. It specifies a block of configuration that applies to a subset of requests. 
+
+Consider the following location block, 
+
+```yaml
+location /portainer/ {
+    proxy_pass http://<backend-container-address>/;
+}
+```
+
+Assuming the domain address is [example.com](http://www.example.com), the above location block will match requests to [https://example.com/portainer/](http://www.example.com/portainer/) 
+and forward those requests to the proxy pass backend service. The variable <span style="color:green">$VIRTUAL_PATH</span> sets the value of the location parameter i.e. the front-end URL (/portainer/ in our example), 
+while the variable <span style="color:green">$VIRTUAL_DEST</span> defines the backend path where the request will be forwarded. So in the above example, VIRTUAL\_DEST=/ appends the trailing slash at the end of the proxy 
+pass address i.e. http://\<backend-container-address\>. 
+
+Essentially nginx gives us complete control over path rewriting of URLs. When the proxy\_pass URL ends with a trailing slash,  the value of the location directive is stripped 
+away from the request and the rest is forwarded to the proxy\_pass address. When the proxy\_pass URL does not end in a trailing slash, nginx appends the value of the 
+location directive to the end of the proxy\_pass URL. The following table summarizes this behaviour. 
+
+
+**Summary of Trailing Slash Behavior**
+
+| Configuration | Resulting Backend Request Path | Example Transformation |
+| ----- | ----- | ----- |
+| location /portainer/ \+ proxy\_pass .../| Strips /portainer/ from the request (e.g., /api → /api). | **Incoming**: https://example.com/portainer/api → **Backend**: https://backend-address.com/api |
+| location /portainer \+ proxy\_pass .../ | Strips /portainer from the request (same as above). | **Incoming**: https://example.com/portainer/api → **Backend**: https://backend-address.com/api |
+| location /portainer/ \+ proxy\_pass ... | Appends /portainer/ to the backend URL (e.g., /api → /portainer/api). | **Incoming**: https://example.com/portainer/api → **Backend**: https://backend-address.com/portainer/api |
+| location /portainer \+ proxy\_pass ...  | Appends /portainer to the backend URL (e.g., /api → /portainer/api). | **Incoming**: https://example.com/portainer/api → **Backend**: https://backend-address.com/portainer/api |
+
+
+  
+Depending on the value of <span style="color:green">$VIRTUAL_DEST</span>, we can tweak the behaviour of Nginx in 3 ways: 
+
+##### Path rewriting
+
+```bash
+export VIRTUAL_PATH=/portainer/ && export VIRTUAL_DEST=/
+```
+
+Resulting nginx configuration: 
+
+```yaml
+location /portainer/ {
+    proxy_pass http://<backend-container-address>/;
+}
+```
+
+Requests to the URL [https://example.com/portainer/](http://www.example.com/portainer/) will strip the portion /portainer/ and forward the rest of the URL to the backend service. 
+
+Example
+
+* Request: [https://example.com/portainer/login](http://www.example.com/portainer/login)   
+* Proxy pass request: <u>http://\<backend-container-address\>/login </u>
+
+##### No Path rewriting
+
+```bash
+export VIRTUAL_PATH=/portainer/ && export VIRTUAL_DEST=/portainer/
+```
+
+Resulting nginx configuration: 
+
+```yaml
+location /portainer/ {
+    proxy_pass http://<backend-container-address>/portainer/;
+}
+```
+
+Requests to the URL [https://example.com/portainer/](http://www.example.com/portainer/) will preserve the full path. 
+
+Example
+
+* Request: [https://example.com/portainer/login](http://www.example.com/portainer/login)   
+* Proxy pass request: <u>http://\<backend-container-address\>/portainer/login </u>
+
+<span style="color:red">Remark</span>
+
+The above request will work only if the backend application expects the path /portainer/login i.e. it natively supports it. If there is no such path, it will result in 
+404 errors. So if your application supports only the subpath /login make sure to make necessary changes. 
+
+##### Partial sub path mapping
+
+```bash
+export VIRTUAL\_PATH=/portainer/ && export VIRTUAL\_DEST=/login/
+```
+
+Resuling nginx configuration: 
+
+```yaml
+location /portainer/ {
+    proxy_pass http://<backend-container-address>/login/;
+}
+```
+
+Requests to the URL [https://example.com/port](http://www.example.com/portainer/)ainer/  will rewrite /portainer/ to /login/ and the request will be forwarded to the 
+proxy\_pass backend service. 
+
+Example
+
+* Request: [https://example.com/portainer/login](http://www.example.com/portainer/login)/api   
+* Proxy pass request: <u>http://\<backend-container-address\>/login/api</u>
+
+
+### ElasticSearch & Kibana
+
+These two applications are quite popular for monitoring and storing logs of applications, and can therefore be very useful in a dev stack. 
+However, in our case, the requirement arose from the development of another custom application. The use case was storing and analyzing metadata 
+(in the form of JSON responses) and enabling search over this metadata. For the scope of this article, these two applications will serve as 
+examples, just like Portainer, to demonstrate how we can integrate them into our current setup with minimal modifications.
+
+The objective of integrating these two applications is to make them accessible behind a URL, for example [https://example.com/kibana/](https://example.com/kibana/) 
+and [https://example.com/elastic/](https://example.com/elastic/). Honestly, it was not trivial to get the Elastic and Kibana stack up and running behind Nginx. 
+A lot depends on how each of these services is configured. Both Elastic and Kibana are customizable to a good extent through environment variables and/or config files. 
+I also had to tweak some of the default options to get everything working. Specifically, I will be running a single-node setup without TLS (i.e., the setup lacks encryption). 
+Obviously, this is not suitable for production purposes, but it works for the scope of this article and for quick development needs. To use this setup in production, please 
+ensure that security is enabled and that a multi-node setup is used to fully leverage the potential of Elasticsearch.
+
+#### elastic search & kibana stack as deployed services 
+
+The following compose file was taken from the [official elastic search website](https://www.elastic.co/guide/en/elasticsearch/reference/8.5/docker.html#docker-file) and was 
+modified accordingly. If you want to simply run docker containers instead of image files, please refer to [this link](https://www.elastic.co/guide/en/elasticsearch/reference/8.5/docker.html#docker) 
+for elastic and [this](https://www.elastic.co/guide/en/kibana/8.4/docker.html#docker) for setting up kibana. 
+
+```yaml
+services:
+
+ elasticsearch:
+   image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+   environment:
+     - discovery.type=single-node
+     - xpack.security.enabled=false
+     - xpack.security.enrollment.enabled=false
+     - VIRTUAL_HOST=${APP_DOMAIN_ADDR}
+     - VIRTUAL_PORT=9200
+     - VIRTUAL_PATH=${ELASTIC_PATH}
+     - VIRTUAL_DEST=/
+   volumes:
+     - esdata01:/usr/share/elasticsearch/data
+   networks:
+     - ${SWARM_NAME}_${NGINX_NETWORK_NAME}
+   deploy:
+     mode: replicated
+     replicas: 1
+     resources:
+       limits:
+         memory: ${ELASTIC_ALLOCATED_MEMORY}
+     placement:
+       constraints: [ node.role == manager ]
+
+ kibana:
+   image: docker.elastic.co/kibana/kibana:8.14.3
+   volumes:
+     - kibanadata:/usr/share/kibana/data
+   networks:
+     - ${SWARM_NAME}_${NGINX_NETWORK_NAME}
+   environment:
+     - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+     - VIRTUAL_HOST=${APP_DOMAIN_ADDR}
+     - VIRTUAL_PORT=5601
+     - VIRTUAL_PATH=${KIBANA_PATH}
+     - VIRTUAL_DEST=/
+     - SERVER_BASEPATH=${KIBANA_SERVER_BASEPATH}
+     - SERVER_PUBLICBASEURL=${KIBANA_SERVER_PUBLICBASEURL}
+   deploy:
+     mode: replicated
+     replicas: 1
+     resources:
+       limits:
+         memory: ${KIBANA_ALLOCATED_MEMORY}
+
+networks:
+ ${SWARM_NAME}_${NGINX_NETWORK_NAME}:
+   external: true
+
+volumes:
+ esdata01:
+ kibanadata:
+```
+
+<span style="color:red">Environment Variables</span>
+
+The variables <span style="color:green">$VIRTUAL_HOST, $VIRTUAL_PORT, $VIRTUAL_PATH & $VIRTUAL_DEST</span> are the same as before 
+and these are responsible for making the application accessible via a URL.  Instead the following variables are required for doing 
+the necessary changes if the application is running behind a proxy. 
+
+**ElasticSearch Configuration**
+
+- <span style="color:green">discovery.type=single-node</span>   
+  * Declares the setup as a **single-node ElasticSearch instance**.  
+- <span style="color:green">xpack.security.enabled=false</span>  
+  * **Disables security features**, such as authentication and TLS, in ElasticSearch.  
+- <span style="color:green">xpack.security.enrollment.enabled=false</span>  
+  * Disables **automatic node enrollment**, simplifying configuration by eliminating the need for certificates or tokens
+
+**Kibana Configuration**
+
+- <span style="color:green">ELASTICSEARCH_HOSTS=http://elasticsearch:9200</span>  
+  * Sets the **URL of the ElasticSearch instance**, which must be reachable by the Kibana container.  
+- <span style="color:green">SERVER_BASEPATH=/kibana</span>  
+  * Defines the **base path** for accessing Kibana behind a reverse proxy.  
+  * **Must not end with a trailing slash** (e.g., `/kibana/` is invalid).  
+* <span style="color:green">SERVER_PUBLICBASEURL=http://example.com/kibana</span>
+  * Specifies the **publicly accessible URL** for Kibana when behind a reverse proxy.
+
+
+For more details or if you need to adjust these variables further, check the official documentation: [Elasticsearch settings](https://www.elastic.co/guide/en/elasticsearch/reference/current/settings.html#config-files-location) 
+and [Kibana settings](https://www.elastic.co/guide/en/kibana/current/settings.html).
+
+### Jenkins
+
+Jenkins can also be a part of this Docker Swarm stack, integrated and deployed in the same way as the other applications mentioned earlier. Our objective here is to make Jenkins accessible behind a URL such as 
+[https://example.com/jenkins](https://example.com/jenkins). In this setup, we will use a single Jenkins master image running behind the Nginx reverse proxy.  
+
+Keep in mind that a CI/CD workflow in Jenkins can be as complex as you want it to be. For now, the goal is to have one master Jenkins controller that executes all jobs. In the future, I plan to integrate a Jenkins agent alongside 
+the controller, which is a cleaner approach since the controller delegates tasks to the agent container.  
+
+#### jenkins as a deployed service
+
+The Compose file for Jenkins is quite straightforward. I simply converted the `docker run` commands into a `docker-compose.yml` file. For reference, I’d like to cite [this article](https://www.cloudbees.com/blog/how-to-install-and-run-jenkins-with-docker-compose) 
+from CloudBees, which is very helpful for our use case and also covers how to add an agent to the Jenkins stack.  
+
+```yaml
+services:
+ jenkins:
+   image: jenkins/jenkins:2.464-jdk17
+   volumes:
+     - jenkins_home:/var/jenkins_home
+   environment:
+     - VIRTUAL_HOST=${APP_DOMAIN_ADDR}
+     - VIRTUAL_PORT=8080
+     - VIRTUAL_PATH=${JENKINS_PATH}
+     - JENKINS_OPTS="--prefix=${JENKINS_PATH}"
+   networks:
+     - ${SWARM_NAME}_${NGINX_NETWORK_NAME}
+   deploy:
+     mode: replicated
+     replicas: 1
+     placement:
+       constraints: [ node.role == manager ]
+
+networks:
+ ${SWARM_NAME}_${NGINX_NETWORK_NAME}:
+   external: true
+
+volumes:
+ jenkins_home:
+```
+
+<span style="color:red">Environment Variables</span>
+
+The variables <span style="color:green">$VIRTUAL_HOST, $VIRTUAL_PORT, $VIRTUAL_PATH</span> are the same as before. 
+Please note that here the variable <span style="color:green">VIRTUAL_DEST</span>  is not present because the value of proxy_pass cannot end in a trailing slash. 
+More information on this topic can be found in [this discussion](https://community.jenkins.io/t/reverse-proxy-test-does-not-handle-url-correctly/1294/13). 
+
+- <span style="color:green">JENKINS_OPTS=”--prefix=$\{JENKINS_PATH\}”</span>   
+  * Required for passing additional parameters to jenkins  
+  * In this case <span style="color:green">--prefix</span> configures the subpath of the application i.e. behind the reverse proxy url   
+  * <span style="color:green">JENKINS_PATH=/jenkins</span> as mentioned above sets the application subpath
+
+
+### Using makefiles to automate deployment
+
+Now this is the section where we will stitch everything together. The answer to deploying these compose files is the command docker stack deploy which we will encapsulate using makefiles. 
+
+```yaml
+include .env
+TEST_SERVICE ?= $(SWARM_NAME)
+NGINX_CONTAINER ?= $(shell docker ps -f name="$(TEST_SERVICE)_$(NGINX_SERVICE_NAME)" --quiet)
+
+build-nginx:
+   @echo "Building nginx swarm $(TEST_SERVICE)..."
+   envsubst < nginx-stack.yml | docker stack deploy -c - $(TEST_SERVICE)
+
+tear-down-nginx:
+   @echo "Tearing down nginx swarm $(TEST_SERVICE)..."
+   docker stack rm $(TEST_SERVICE)
+
+display-nginx-config:
+   @echo "Displaying nginx config of nginx container $(NGINX_CONTAINER)"
+   docker exec $(NGINX_CONTAINER) nginx -T
+
+build-portainer:
+   @echo "Building portainer service $(PORTAINER_SWARM_NAME)..."
+   envsubst < portainer-agent-stack.yml | docker stack deploy -c - $(PORTAINER_SWARM_NAME)
+
+tear-down-portainer:
+   @echo "Tearing down portainer service $(PORTAINER_SWARM_NAME)..."
+   docker stack rm $(PORTAINER_SWARM_NAME)
+
+build-jenkins:
+   @echo "Building jenkins service $(JENKINS_SWARM_NAME)..."
+   envsubst < jenkins-stack.yml | docker stack deploy -c - $(JENKINS_SWARM_NAME)
+
+tear-down-jenkins:
+   @echo "Tearing down jenkins service $(JENKINS_SWARM_NAME)..."
+   docker stack rm $(JENKINS_SWARM_NAME)
+
+build-elasticsearch:
+   @echo "Building elasticsearch-kibana service $(ELASTIC_SWARM_NAME)..."
+   envsubst < elasticsearch-kibana-stack-no-ssl.yml | docker stack deploy -c - $(ELASTIC_SWARM_NAME)
+
+tear-down-elasticsearch:
+   @echo "Tearing down elasticsearch-kibana service $(ELASTIC_SWARM_NAME)..."
+   docker stack rm $(ELASTIC_SWARM_NAME)
+
+all: build-nginx build-portainer build-elasticsearch build-jenkins
+```
+
+A sample `.env` file would look something like this: 
+
+```bash
+# nginx reverse proxy vars
+export NGINX_NETWORK_NAME=reverse_proxy_network
+export NGINX_SERVICE_NAME=reverse-proxy
+export SWARM_NAME=nginx
+
+# local IP address & DNS address
+export GCP_INTERNAL_IP_ADDR=XX.XXX.X.X
+export APP_DOMAIN_ADDR=example.com
+
+# portainer vars
+export PORTAINER_PATH=/portainer/
+export PORTAINER_SERVICE_NAME=portainer
+export PORTAINER_SWARM_NAME=portainer
+
+# acme vars
+export ACME_DEFAULT_EMAIL=username@email.com
+export ACME_CA_URI=https://acme-v02.api.letsencrypt.org/directory
+
+# jenkins vars
+export JENKINS_PATH=/jenkins
+export JENKINS_SWARM_NAME=jenkins
+
+# elasticsearch kibana vars
+export ELASTIC_PATH=/elastic/
+export ELASTIC_SWARM_NAME=elastic
+export ELASTIC_ALLOCATED_MEMORY="4GB"
+export KIBANA_PATH=/kibana/
+export KIBANA_SERVER_BASEPATH=/kibana
+export KIBANA_SERVER_PUBLICBASEURL=http://${APP_DOMAIN_ADDR}/kibana
+export KIBANA_ALLOCATED_MEMORY="1GB"
+```
+
+#### deploying the complete stack
+
+To get the whole stack up and running it should be enough to do:
+
+```bash
+source .env && make all 
+```
+
+Or to deploy individual stack of a particular application, say portainer: 
+
+```bash
+source .env && make build-portainer
+```
+
+### Wrapping Up  
+
+So that’s it for this part! We’ve managed to get Portainer, Elasticsearch, Kibana, and 
+even Jenkins running nicely behind Nginx with Docker Swarm handling the orchestration. 
+The cool part is that once the reverse proxy and SSL setup are in place, adding new apps 
+is mostly just repeating the same steps with a few tweaks. It keeps the whole setup neat and easy to manage.  
+
+In the next posts, I’ll probably dive into the Elasticsearch YAML file to get a TLS-enabled setup running in our stack.  
+I might also walk through how to make small tweaks to the auto-generated Nginx config while still keeping everything managed through nginx-proxy. 
+
+**Stay tuned!** 🚀  

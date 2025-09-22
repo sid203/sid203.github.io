@@ -1,5 +1,5 @@
 <div align="center">
-  <img alt="Astro Cactus logo" src="https://github.com/chrismwilliams/astro-theme-cactus/assets/12715988/85aa0d3c-ef6a-44e2-954d-ef035b4f4315" width="70" />
+  <img alt="Astro Cactus logo" src="https://raw.githubusercontent.com/sid203/sid203.github.io/refs/heads/main/public/noun-maxell-couch-6775760.png" width="70" />
 </div>
 <h1 align="center">
   Astro Cactus
@@ -48,7 +48,7 @@ Astro Cactus is a simple opinionated starter built with [Astro](https://astro.bu
 
 ## Demo 💻
 
-Check out the [Demo](https://astro-cactus.chriswilliams.dev/), hosted on Netlify
+Check out the [Demo](https://sid203.github.io/), hosted on github
 
 ## Quick start
 

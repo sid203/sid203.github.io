@@ -1,5 +1,5 @@
 ---
-title: "Multiple Containers on a VM with Reverse Proxy - Part 1"
+title: "Multiple Docker Services on One VM with Nginx - Part 1"
 description: "This post showcases how a GCE VM can be configured with nginx config & automated SSL certificate management"
 publishDate: "08 Aug 2025"
 updatedDate: "08 Aug 2025"
@@ -242,6 +242,38 @@ volumes:
  html:
  acme:
 ```
+After deploying the above container together with the nginx-proxy container the basic setup to host an application that is SSL secured
+ is complete. The missing piece of the puzzle is the application container that should be hosted on a domain URL and requesting a 
+ certificate for this domain URL. So, to request a certificate for an application, say app1, accessible on the domain 
+ [https://example.com/app1](http://www.example.com/app1), the compose file for the application must contain two necessary environment 
+ variables i.e. VIRTUAL\_HOST=[example.com](http://www.example.com) & LETSENCRYPT\_HOST=[example.com](http://www.example.com). 
+ More on this in subsequent articles later on when we will discuss deployment of Portainer application. Also, if you want to request an SSL 
+ certificate for multiple applications, ([https://example.com/app1](http://www.example.com/app1), 
+ [https://example.com/app2](http://www.example.com/app2), [https://example.com/app3](http://www.example.com/app3)) it is simply enough to 
+ include the two required environment variables in only one of the three compose files because all three applications share a common domain.
+
+
+<span style="color:red">Remark</span>
+   
+*Possible errors & tips for debugging*
+
+Acme companion container needs to request and refresh certificates from an external API, which in our case is Let’s Encrypt’s API. 
+This means both ingress & egress traffic should be enabled on the VM. Hence make sure that firewall rules are accordingly updated. 
+The list of allowed IP addresses should contain 0.0.0.0/0 for this operation. This renewal operation happens every 1 or 3 months. 
+The firewall rules can be updated again. Also make sure that port 80 is open, as it is the default port that is used for completion of 
+HTTPS-01 challenge. 
+
+
+
+<span style="color:red">Environment Variables</span>
+
+
+Additional environment variables required for acme-companion, apart from the environment variables mentioned above are the following two: 
+
+* <span style="color:green">$DEFAULT_EMAIL</span> :  an email address to receive Let’s Encrypt notifications about expiring certificates  
+* <span style="color:green">$ACME_CA_URI</span> :  variable that points to the Let’s Encrypt API endpoint. The endpoints are available in 
+the [let’s encrypt documentation](https://letsencrypt.org/docs/acme-protocol-updates/). For testing purposes it is better to use their 
+staging endpoint. 
 
 ## Wrapping up: What’s Next?
 
