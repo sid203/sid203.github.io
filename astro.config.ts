@@ -18,6 +18,8 @@ import { remarkAdmonitions } from "./src/plugins/remark-admonitions"; /* Add adm
 import { remarkGithubCard } from "./src/plugins/remark-github-card";
 import { remarkReadingTime } from "./src/plugins/remark-reading-time";
 import { expressiveCodeOptions, siteConfig } from "./src/site.config";
+import umami from "@yeskunall/astro-umami";
+
 
 // https://astro.build/config
 export default defineConfig({
@@ -65,6 +67,7 @@ export default defineConfig({
 				insertManifestLink: false,
 			},
 		}),
+		umami({ id: "6413ff31-8715-4622-874e-44adc423f120" }),
 	],
 	markdown: {
 		rehypePlugins: [
