@@ -1,0 +1,185 @@
+---
+title: "Mocking Datetime without breaking Strptime"
+description: "Some tips and tricks about unittesting modules that use python's datetime functions"
+publishDate: "31 Mar 2026"
+updatedDate: "31 Mar 2026"
+tags: ["python", "unittesting"]
+draft: false
+---
+
+<div class="text-left leading-relaxed">
+
+### What is this behaviour, Python? 
+
+The other day, I wanted to unit test a class that used both datetime.now and datetime.strptime. A known hurdle with the datetime module is that it is a **built-in C-extension**. 
+If you try to use the decorator `@mock.patch("datetime.datetime.now")`, Python will raise a `TypeError` because you cannot set attributes on built-in objects.
+
+To solve this, you must patch the namespace where datetime is used for example, `@mock.patch("mymodule.datetime")`. However, this creates a new problem: by patching the entire 
+datetime class/module, everything is replaced with a `MagicMock`.
+
+This means calls to utility methods like strptime or strftime now return `MagicMock` instances instead of real date/datetime objects. This often breaks logic that expects a real
+timestamp. Ideally, we want to mock only `datetime.now` while letting all other methods function normally.
+
+There are two elegant solutions to this: first using the `side_effect` attribute and the second using the `wraps` attribute. Let’s see how.
+
+
+### Reproducing the TypeError 
+
+Consider the following code implemented under some module <span style="color:green">tandon.py</span>. 
+
+```python
+from datetime import datetime
+
+class Token:
+    def is_token_expired(self, token_timestamp: str) -> bool:
+        token_timestamp_dt = datetime.strptime(token_timestamp, "%Y%m%d %H:%M:%S")
+        return datetime.now() > token_timestamp_dt
+```
+
+I would like to mock the `datetime.now` method such that it returns a datetime object of my choice. Here is my first attempt.  
+
+
+```python 
+from unittest import TestCase, mock
+from datetime import datetime
+from tandon import Token
+
+
+class TestToken(TestCase):
+    
+    @mock.patch("tandon.datetime.now")
+    def test_001_token_expired(self, mock_date):
+        mock_date.now.return_value = datetime(day=1, month=1, year=2026)
+
+        token = Token()
+        token_expiry = "20260330 06:00:00"
+
+        result = token.is_token_expired(token_expiry)
+        self.assertFalse(result)
+```
+
+The above fails because the attributes of the built-in datetime class cannot be patched directly. Python will raise a 
+TypeError indicating that it cannot set attributes on this extension type. 
+
+### Fixing the TypeError
+
+A quick fix to the above problem is to patch the whole `datetime` module. 
+
+```python
+from unittest import TestCase, mock
+from datetime import datetime
+from tandon import Token
+
+
+class TestToken(TestCase):
+    
+    @mock.patch("tandon.datetime")
+    def test_001_token_expired(self, mock_date):
+        mock_date.now.return_value = datetime(day=1, month=1, year=2026)
+
+        token = Token()
+        token_expiry = "20260330 06:00:00"
+
+        result = token.is_token_expired(token_expiry)
+        self.assertFalse(result)
+```
+
+So, what do you think? Does it work? Still no.  
+Since we have mocked the entire `datetime` class to control `now()`, the call to `strptime` also returns a `MagicMock` instance. 
+This causes the comparison `datetime.now() > token_timestamp_dt` to fail because you cannot compare a `MagicMock` instance to a real datetime object.
+
+What I want is to mock only the `datetime.now` method while leaving all other methods as they are. There is an elegant solution to this using the `side_effect` attribute.
+
+Let’s see how.
+
+```python
+from unittest import TestCase, mock
+from datetime import datetime
+from tandon import Token
+
+
+class TestToken(TestCase):
+    
+    @mock.patch("tandon.datetime")
+    def test_001_token_expired(self, mock_date):
+        mock_date.now.return_value = datetime(day=1, month=1, year=2026)
+        mock_date.strptime.side_effect = datetime.strptime
+
+        token = Token()
+        token_expiry = "20260330 06:00:00"
+
+        result = token.is_token_expired(token_expiry)
+        self.assertFalse(result)
+```
+
+When the method `mock_date.strptime` is called, the call gets directed to the method attached to the `side_effect` attribute which is `datetime.strptime`. 
+
+
+### Can we do better? 
+
+The unittest module has a `wraps` parameter.
+
+From the Python documentation:
+> **wraps**: Item for the mock object to wrap. If `wraps` is not `None` then 
+> calling the Mock will pass the call through to the wrapped object 
+> (returning the real result). Attribute access on the mock will return 
+> a Mock object that wraps the corresponding attribute of the wrapped object 
+> (so attempting to access an attribute that doesn’t exist will raise an `AttributeError`).
+
+It turns out that using `wraps=datetime` does exactly what I suggested in the solution above using `side_effect` attribute. The above solution does not really scale 
+well in case there are a lot of method calls that need to be patched. The attribute `wraps` is perfect for this use case. 
+
+```python
+from unittest import TestCase, mock
+from datetime import datetime
+from tandon import Token
+
+
+class TestToken(TestCase):
+
+    @mock.patch("tandon.datetime", wraps=datetime)
+    def test_002_token_expired_with_wraps(self, mock_date):
+        mock_date.now.return_value = datetime(day=1, month=1, year=2026)
+
+        token = Token()
+        token_expiry = "20260330 06:00:00"
+
+        result = token.is_token_expired(token_expiry)
+        self.assertFalse(result)
+
+```
+
+#### Note on Namespaces
+
+:::note
+
+The module `tandon.py` imports the `datetime` class using the statement `from datetime import datetime`.
+Consequently, our patch targets the class reference within `tandon.py` rather than the entire module. 
+We pass the `datetime` class to the `wraps` parameter to ensure the mock behaves exactly like the original class, 
+except for the specific methods we have explicitly overridden.
+:::
+
+
+### Closing thoughts 
+Many thanks for sticking through to the end! Hope this blog helped shed some light on the nuances of mocking the datetime module 
+and provided solutions to make your Python testing more readable and robust. Feel free to share this blog or reach out with
+your own testing tricks you have up your own sleeves. 
+
+To celebrate this successful blog post, I would like to dedicate this track to you. For a premium experience, close your eyes, sit back, three deep breaths and chill. 
+
+
+<div class="aspect-video w-full my-8">
+  <iframe 
+    width="100%" 
+    height="100%" 
+    src="https://www.youtube.com/embed/Xauo-3DMmoc?si=DMuIBXj3JCWPz0hM" 
+    title="YouTube video player" 
+    frameborder="0" 
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+    referrerpolicy="strict-origin-when-cross-origin" 
+    allowfullscreen
+    class="rounded-xl shadow-lg"
+  ></iframe>
+</div>
+
+</div>
